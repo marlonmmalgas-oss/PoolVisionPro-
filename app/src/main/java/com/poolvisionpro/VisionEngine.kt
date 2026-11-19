@@ -56,7 +56,7 @@ object VisionEngine {
 
             // 8 Ball Pool's blue/cyan felt. OpenCV hue is 0..179.
             // Broad enough for lighting variation; contour geometry rejects HUD panels.
-            Core.inRange(hsv, Scalar(78.0, 48.0, 48.0), Scalar(112.0, 255.0, 255.0), mask)
+            Core.inRange(hsv, Scalar(12.0, 48.0, 48.0), Scalar(35.0, 255.0, 255.0), mask)
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN,
                 Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0)))
