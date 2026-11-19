@@ -11,8 +11,8 @@ android {
         applicationId = "com.poolvisionpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0-opencv"
     }
 
     compileOptions {
@@ -20,7 +20,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    // Native OpenCV image processing for table contours and circular ball candidates.
+    implementation("org.opencv:opencv:4.10.0")
 }

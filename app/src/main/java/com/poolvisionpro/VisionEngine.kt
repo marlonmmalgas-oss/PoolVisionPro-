@@ -3,42 +3,188 @@ package com.poolvisionpro
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
-import kotlin.math.*
+import org.opencv.android.Utils
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint
+import org.opencv.core.Point
+import org.opencv.core.Rect
+import org.opencv.core.Scalar
+import org.opencv.core.Size
+import org.opencv.imgproc.Imgproc
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 
-data class Ball(val x:Float,val y:Float,val radius:Float,val color:Int)
-data class Line(val x1:Float,val y1:Float,val x2:Float,val y2:Float,val kind:Int)
-data class FrameAnalysis(val table:RectF?,val balls:List<Ball>,val lines:List<Line>,val status:String)
+/** Coordinates in the source screenshot's pixel space. */
+data class Ball(val x: Float, val y: Float, val radius: Float, val color: Int)
+data class Line(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val kind: Int)
+data class FrameAnalysis(val table: RectF?, val balls: List<Ball>, val lines: List<Line>, val status: String)
 
+/**
+ * OpenCV-based first-stage vision pipeline.
+ * It deliberately suppresses all overlays when table confidence is poor instead of
+ * drawing plausible-looking but incorrect rectangles and aim rays.
+ */
 object VisionEngine {
-    fun analyse(bitmap:Bitmap):FrameAnalysis {
-        val step=max(2,max(bitmap.width,bitmap.height)/650); val w=max(1,bitmap.width/step); val h=max(1,bitmap.height/step)
-        val px=IntArray(w*h); val felt=BooleanArray(w*h); val hsv=FloatArray(3)
-        for(y in 0 until h) for(x in 0 until w) { val c=bitmap.getPixel(min(bitmap.width-1,x*step),min(bitmap.height-1,y*step)); px[y*w+x]=c; Color.colorToHSV(c,hsv); felt[y*w+x]=hsv[0] in 185f..200f && hsv[1]>.25f && hsv[2] in .35f.. .92f }
-        var l=w;var t=h;var r=0;var b=0;var n=0
-        for(y in 0 until h) for(x in 0 until w) if(felt[y*w+x]) { l=min(l,x);t=min(t,y);r=max(r,x);b=max(b,y);n++ }
-        val table=if(n>w*h/35 && r-l>w/4 && b-t>h/8) RectF(l*step.toFloat(),t*step.toFloat(),r*step.toFloat(),b*step.toFloat()) else null
-        val mask=BooleanArray(w*h)
-        for(i in px.indices) { Color.colorToHSV(px[i],hsv); val white=hsv[2]>.72f&&hsv[1]<.34f; val colour=hsv[1]>.48f&&hsv[2]>.34f&&hsv[2]<.96f; mask[i]=!(hsv[0] in 180f..205f)&&(white||colour) }
-        val seen=BooleanArray(w*h);val q=IntArray(w*h);val found=ArrayList<Ball>()
-        for(start in mask.indices) { if(!mask[start]||seen[start]) continue
-            var head=0;var tail=0;q[tail++]=start;seen[start]=true;var sx=0.0;var sy=0.0;var cr=0L;var cg=0L;var cb=0L;var x0=w;var x1=0;var y0=h;var y1=0
-            while(head<tail) { val i=q[head++];val x=i%w;val y=i/w;val c=px[i];sx+=x;sy+=y;cr+=Color.red(c);cg+=Color.green(c);cb+=Color.blue(c);x0=min(x0,x);x1=max(x1,x);y0=min(y0,y);y1=max(y1,y)
-                for(dy in -1..1) for(dx in -1..1) { val xx=x+dx;val yy=y+dy;if(xx in 0 until w&&yy in 0 until h){val j=yy*w+xx;if(mask[j]&&!seen[j]){seen[j]=true;q[tail++]=j}} }
-            }
-            val bw=x1-x0+1;val bh=y1-y0+1;val ratio=bw.toFloat()/bh
-            if(tail in 5..400 && ratio in .62f..1.62f && bw in 3..40 && bh in 3..40) found.add(Ball((sx/tail*step).toFloat(),(sy/tail*step).toFloat(),(bw+bh)*step/4f,Color.rgb((cr/tail).toInt(),(cg/tail).toInt(),(cb/tail).toInt())))
-        }
-        val balls=if(table!=null) found.filter{table.contains(it.x,it.y)} else found
-        val cue=balls.minByOrNull{abs(255-Color.red(it.color))+abs(255-Color.green(it.color))+abs(255-Color.blue(it.color))}
-        val lines=ArrayList<Line>()
-        if(cue!=null&&table!=null) { val target=balls.filter{it!==cue}.minByOrNull{hypot((it.x-cue.x).toDouble(),(it.y-cue.y).toDouble())}; if(target!=null) {
-            val dx=target.x-cue.x;val dy=target.y-cue.y;val len=max(1f,hypot(dx,dy));val ux=dx/len;val uy=dy/len
-            lines.add(Line(cue.x,cue.y,target.x-ux*(cue.radius+target.radius),target.y-uy*(cue.radius+target.radius),0))
-            val end=ray(target.x,target.y,ux,uy,table);lines.add(Line(target.x,target.y,end.first,end.second,1))
-            val mirrors=listOf(Pair(2*table.left-target.x,target.y),Pair(2*table.right-target.x,target.y),Pair(target.x,2*table.top-target.y),Pair(target.x,2*table.bottom-target.y))
-            mirrors.forEach{m->val vx=m.first-cue.x;val vy=m.second-cue.y;val vl=max(1f,hypot(vx,vy));val hit=ray(cue.x,cue.y,vx/vl,vy/vl,table);lines.add(Line(cue.x,cue.y,hit.first,hit.second,2))}
-        }}
-        return FrameAnalysis(table,balls,lines,if(balls.isEmpty()) "SEARCHING FOR BALLS" else "${balls.size} BALL CANDIDATES")
+    @Volatile private var initialized = false
+    @Synchronized private fun ensureOpenCv(): Boolean {
+        if (initialized) return true
+        return try {
+            initialized = org.opencv.android.OpenCVLoader.initLocal()
+            initialized
+        } catch (_: Throwable) { false }
     }
-    private fun ray(x:Float,y:Float,dx:Float,dy:Float,r:RectF):Pair<Float,Float>{val ts=ArrayList<Float>();if(dx>0)ts.add((r.right-x)/dx) else if(dx<0)ts.add((r.left-x)/dx);if(dy>0)ts.add((r.bottom-y)/dy) else if(dy<0)ts.add((r.top-y)/dy);val k=ts.filter{it>0}.minOrNull()?:0f;return Pair(x+dx*k,y+dy*k)}
+
+    fun analyse(bitmap: Bitmap): FrameAnalysis {
+        if (!ensureOpenCv()) return FrameAnalysis(null, emptyList(), emptyList(), "OPENCV NOT AVAILABLE")
+        val src = Mat()
+        val small = Mat()
+        val hsv = Mat()
+        val mask = Mat()
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(9.0, 9.0))
+        val contours = ArrayList<MatOfPoint>()
+        try {
+            Utils.bitmapToMat(bitmap, src)
+            // Work at a fixed maximum width to reduce per-frame CPU cost.
+            val scale = min(1.0, 900.0 / src.cols().toDouble())
+            Imgproc.resize(src, small, Size(), scale, scale, Imgproc.INTER_AREA)
+            Imgproc.cvtColor(small, hsv, Imgproc.COLOR_RGBA2RGB)
+            Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
+
+            // 8 Ball Pool's blue/cyan felt. OpenCV hue is 0..179.
+            // Broad enough for lighting variation; contour geometry rejects HUD panels.
+            Core.inRange(hsv, Scalar(78.0, 48.0, 48.0), Scalar(112.0, 255.0, 255.0), mask)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN,
+                Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0)))
+            Imgproc.findContours(mask, contours, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+            val frameArea = small.cols().toDouble() * small.rows().toDouble()
+            val candidates = contours.mapNotNull { contour ->
+                val area = Imgproc.contourArea(contour)
+                if (area < frameArea * 0.12) return@mapNotNull null
+                val r = Imgproc.boundingRect(contour)
+                val aspect = r.width.toDouble() / max(1, r.height)
+                val centerX = r.x + r.width / 2.0
+                val centerY = r.y + r.height / 2.0
+                // Pool table felt is a large, near-2:1 central surface; reject HUD rectangles.
+                if (aspect !in 1.45..2.25 || r.width < small.cols() * 0.42 || r.height < small.rows() * 0.18) return@mapNotNull null
+                if (centerX !in (small.cols() * 0.25)..(small.cols() * 0.80) || centerY !in (small.rows() * 0.18)..(small.rows() * 0.88)) return@mapNotNull null
+                Triple(r, area, abs(aspect - 2.0))
+            }.sortedWith(compareByDescending<Triple<Rect, Double, Double>> { it.second }.thenBy { it.third })
+
+            val tableRect = candidates.firstOrNull()?.first
+                ?: return FrameAnalysis(null, emptyList(), emptyList(), "TABLE NOT LOCKED — KEEP FULL TABLE VISIBLE")
+
+            // Exclude cushion rails by shrinking the felt contour slightly.
+            val insetX = max(2, (tableRect.width * 0.012).toInt())
+            val insetY = max(2, (tableRect.height * 0.018).toInt())
+            val inner = Rect(
+                tableRect.x + insetX,
+                tableRect.y + insetY,
+                max(1, tableRect.width - 2 * insetX),
+                max(1, tableRect.height - 2 * insetY)
+            )
+            val gray = Mat()
+            val blur = Mat()
+            val circles = Mat()
+            try {
+                val roi = small.submat(inner)
+                Imgproc.cvtColor(roi, gray, Imgproc.COLOR_RGBA2GRAY)
+                Imgproc.GaussianBlur(gray, blur, Size(7.0, 7.0), 1.6)
+                val expectedRadius = inner.width.toDouble() / 72.0
+                Imgproc.HoughCircles(
+                    blur, circles, Imgproc.HOUGH_GRADIENT,
+                    1.25, expectedRadius * 1.65,
+                    105.0, 27.0,
+                    max(5, (expectedRadius * 0.68).toInt()),
+                    max(7, (expectedRadius * 1.38).toInt())
+                )
+                val detected = ArrayList<Ball>()
+                if (!circles.empty()) {
+                    for (i in 0 until circles.cols()) {
+                        val v = circles.get(0, i) ?: continue
+                        if (v.size < 3) continue
+                        val x = v[0] + inner.x
+                        val y = v[1] + inner.y
+                        val radius = v[2]
+                        if (x < inner.x + radius || x > inner.x + inner.width - radius ||
+                            y < inner.y + radius || y > inner.y + inner.height - radius) continue
+                        val px = small.get(min(small.rows() - 1, y.toInt()), min(small.cols() - 1, x.toInt())) ?: continue
+                        if (px.size < 3) continue
+                        val color = Color.rgb(px[0].toInt().coerceIn(0,255), px[1].toInt().coerceIn(0,255), px[2].toInt().coerceIn(0,255))
+                        // Deduplicate near-identical Hough responses.
+                        if (detected.none { hypot((it.x - x).toDouble(), (it.y - y).toDouble()) < radius * 0.8 }) {
+                            detected.add(Ball((x / scale).toFloat(), (y / scale).toFloat(), (radius / scale).toFloat(), color))
+                        }
+                    }
+                }
+
+                val table = RectF(
+                    (inner.x / scale).toFloat(), (inner.y / scale).toFloat(),
+                    ((inner.x + inner.width) / scale).toFloat(), ((inner.y + inner.height) / scale).toFloat()
+                )
+                val fullBalls = detected
+                val cue = identifyCue(fullBalls)
+                val lines = ArrayList<Line>()
+                // Only produce a provisional centre-to-centre guide when cue and target
+                // are both credible. This is not claimed to infer the player's chosen aim.
+                if (cue != null && fullBalls.size >= 2) {
+                    val target = fullBalls.filter { it !== cue }.minByOrNull {
+                        hypot((it.x - cue.x).toDouble(), (it.y - cue.y).toDouble())
+                    }
+                    if (target != null) {
+                        val dx = target.x - cue.x
+                        val dy = target.y - cue.y
+                        val length = hypot(dx.toDouble(), dy.toDouble()).toFloat().coerceAtLeast(1f)
+                        val ux = dx / length
+                        val uy = dy / length
+                        val contactX = target.x - ux * (cue.radius + target.radius)
+                        val contactY = target.y - uy * (cue.radius + target.radius)
+                        lines.add(Line(cue.x, cue.y, contactX, contactY, 0))
+                        val end = rayToTable(target.x, target.y, ux, uy, table)
+                        lines.add(Line(target.x, target.y, end.first, end.second, 1))
+                    }
+                }
+                val status = when {
+                    fullBalls.isEmpty() -> "TABLE LOCKED • NO BALLS CONFIRMED"
+                    cue == null -> "TABLE LOCKED • CUE BALL NOT CONFIRMED • ${fullBalls.size} BALLS"
+                    else -> "TABLE LOCKED • ${fullBalls.size} BALLS • CUE CONFIRMED"
+                }
+                return FrameAnalysis(table, fullBalls, lines, status)
+            } finally {
+                gray.release(); blur.release(); circles.release()
+            }
+        } catch (t: Throwable) {
+            return FrameAnalysis(null, emptyList(), emptyList(), "VISION ERROR: ${t.javaClass.simpleName}")
+        } finally {
+            contours.forEach { it.release() }
+            src.release(); small.release(); hsv.release(); mask.release(); kernel.release()
+        }
+    }
+
+    private fun identifyCue(balls: List<Ball>): Ball? {
+        if (balls.size < 2) return null
+        // Cue candidate must be bright and nearly neutral; require a clear score gap.
+        val ranked = balls.map { b ->
+            val r = Color.red(b.color).toDouble(); val g = Color.green(b.color).toDouble(); val bl = Color.blue(b.color).toDouble()
+            val brightness = (r + g + bl) / 3.0
+            val spread = max(r, max(g, bl)) - min(r, min(g, bl))
+            b to (brightness - spread * 1.35)
+        }.sortedByDescending { it.second }
+        val first = ranked.first()
+        val second = ranked.getOrNull(1)?.second ?: 0.0
+        return if (first.second > 145.0 && first.second - second > 8.0) first.first else null
+    }
+
+    private fun rayToTable(x: Float, y: Float, dx: Float, dy: Float, r: RectF): Pair<Float, Float> {
+        val ts = ArrayList<Float>(2)
+        if (dx > 0f) ts.add((r.right - x) / dx) else if (dx < 0f) ts.add((r.left - x) / dx)
+        if (dy > 0f) ts.add((r.bottom - y) / dy) else if (dy < 0f) ts.add((r.top - y) / dy)
+        val t = ts.filter { it > 0f }.minOrNull() ?: 0f
+        return Pair(x + dx * t, y + dy * t)
+    }
 }
