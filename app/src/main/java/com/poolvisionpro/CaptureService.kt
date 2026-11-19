@@ -12,6 +12,7 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.*
+import java.nio.ByteBuffer
 
 class CaptureService:Service(){
  private var projection:MediaProjection?=null;private var reader:ImageReader?=null;private var display:VirtualDisplay?=null;private var worker:HandlerThread?=null;@Volatile private var last=0L
@@ -25,7 +26,19 @@ class CaptureService:Service(){
   if(Build.VERSION.SDK_INT>=34)projection?.registerCallback(object:MediaProjection.Callback(){override fun onStop(){stopSelf()}},Handler(mainLooper))
   val m=resources.displayMetrics;val w=m.widthPixels;val h=m.heightPixels;worker=HandlerThread("PV-frame").also{it.start()};reader=ImageReader.newInstance(w,h,PixelFormat.RGBA_8888,2)
   reader!!.setOnImageAvailableListener({r->val now=System.currentTimeMillis();if(now-last<160){r.acquireLatestImage()?.close();return@setOnImageAvailableListener};last=now;val im=r.acquireLatestImage()?:return@setOnImageAvailableListener
-   try{val p=im.planes[0];val pad=p.rowStride-p.pixelStride*im.width;val wide=Bitmap.createBitmap(im.width+pad/p.pixelStride,im.height,Bitmap.Config.ARGB_8888);wide.copyPixelsFromBuffer(p.buffer);val bmp=Bitmap.createBitmap(wide,0,0,im.width,im.height);wide.recycle();OverlayService.publish(VisionEngine.analyse(bmp),w,h);bmp.recycle()}catch(_:Throwable){ }finally{im.close()}
+   try{val p=im.planes[0];val pad=p.rowStride-p.pixelStride*im.width;val wide=Bitmap.createBitmap(im.width+pad/p.pixelStride,im.height,Bitmap.Config.ARGB_8888);val raw = ByteArray(p.buffer.remaining())
+   p.buffer.get(raw)
+   for (row in 0 until im.height) {
+    for (col in 0 until im.width) {
+     val i = row * p.rowStride + col * p.pixelStride
+     if (i + 2 < raw.size) {
+      val red = raw[i]
+      raw[i] = raw[i + 2]
+      raw[i + 2] = red
+     }
+    }
+   }
+   wide.copyPixelsFromBuffer(ByteBuffer.wrap(raw));val bmp=Bitmap.createBitmap(wide,0,0,im.width,im.height);wide.recycle();OverlayService.publish(VisionEngine.analyse(bmp),w,h);bmp.recycle()}catch(_:Throwable){ }finally{im.close()}
   },Handler(worker!!.looper))
   display=projection?.createVirtualDisplay("PV",w,h,m.densityDpi,DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader!!.surface,null,Handler(worker!!.looper));return START_NOT_STICKY
  }
