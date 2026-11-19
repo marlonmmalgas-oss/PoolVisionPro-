@@ -13,12 +13,12 @@ object VisionEngine {
     fun analyse(bitmap:Bitmap):FrameAnalysis {
         val step=max(2,max(bitmap.width,bitmap.height)/650); val w=max(1,bitmap.width/step); val h=max(1,bitmap.height/step)
         val px=IntArray(w*h); val felt=BooleanArray(w*h); val hsv=FloatArray(3)
-        for(y in 0 until h) for(x in 0 until w) { val c=bitmap.getPixel(min(bitmap.width-1,x*step),min(bitmap.height-1,y*step)); px[y*w+x]=c; Color.colorToHSV(c,hsv); felt[y*w+x]=hsv[0] in 165f..215f && hsv[1]>.18f && hsv[2] in .25f.. .92f }
+        for(y in 0 until h) for(x in 0 until w) { val c=bitmap.getPixel(min(bitmap.width-1,x*step),min(bitmap.height-1,y*step)); px[y*w+x]=c; Color.colorToHSV(c,hsv); felt[y*w+x]=hsv[0] in 185f..200f && hsv[1]>.25f && hsv[2] in .35f.. .92f }
         var l=w;var t=h;var r=0;var b=0;var n=0
         for(y in 0 until h) for(x in 0 until w) if(felt[y*w+x]) { l=min(l,x);t=min(t,y);r=max(r,x);b=max(b,y);n++ }
         val table=if(n>w*h/35 && r-l>w/4 && b-t>h/8) RectF(l*step.toFloat(),t*step.toFloat(),r*step.toFloat(),b*step.toFloat()) else null
         val mask=BooleanArray(w*h)
-        for(i in px.indices) { Color.colorToHSV(px[i],hsv); val white=hsv[2]>.72f&&hsv[1]<.34f; val colour=hsv[1]>.48f&&hsv[2]>.34f&&hsv[2]<.96f; mask[i]=!felt[i]&&(white||colour) }
+        for(i in px.indices) { Color.colorToHSV(px[i],hsv); val white=hsv[2]>.72f&&hsv[1]<.34f; val colour=hsv[1]>.48f&&hsv[2]>.34f&&hsv[2]<.96f; mask[i]=!(hsv[0] in 180f..205f)&&(white||colour) }
         val seen=BooleanArray(w*h);val q=IntArray(w*h);val found=ArrayList<Ball>()
         for(start in mask.indices) { if(!mask[start]||seen[start]) continue
             var head=0;var tail=0;q[tail++]=start;seen[start]=true;var sx=0.0;var sy=0.0;var cr=0L;var cg=0L;var cb=0L;var x0=w;var x1=0;var y0=h;var y1=0
